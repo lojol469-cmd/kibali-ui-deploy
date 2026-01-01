@@ -3,8 +3,33 @@ import axios from 'axios';
 import {
   Send, FileText, Upload, Globe, MapPin,
   Loader2, Trash2, Image as ImageIcon, Search, Brain, ChevronDown, ChevronUp, User,
-  Database, Clock, TrendingUp, AlertCircle, CheckCircle, Zap
+  Database, Clock, TrendingUp, AlertCircle, CheckCircle, Zap,
+  LogOut
 } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  GoogleAuthProvider, 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+
+// Configuration Firebase
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyCel4qvAtZomh4aQOCArCLIYSYmeZ4Qbig",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "sevenstatut.firebaseapp.com",
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || "https://sevenstatut-default-rtdb.firebaseio.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "sevenstatut",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "sevenstatut.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "838268990346",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:838268990346:web:dba8702c39e82981704e73"
+};
+
+// Initialiser Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const googleProvider = new GoogleAuthProvider();
 
 const API_BASE = "https://belikanm-kibali-api.hf.space";
 const LOGO_PATH = "/kibali_logo.svg";
@@ -18,18 +43,33 @@ function App() {
     doc_chunks: 0,
     memory_entries: 0,
     current_subject: null,
-    subject_message_count: 0
+    subject_message_count: 0,
+    torch_cuda_available: false,
+    status: 'unknown'
   });
   const [showThinking, setShowThinking] = useState({});
   const [uploadProgress, setUploadProgress] = useState(null);
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
   const scrollRef = useRef(null);
   const pollingInterval = useRef(null);
 
-  // Récupération du status backend au démarrage et périodiquement
+  // Gestion de l'authentification
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setAuthLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Récupération du statut du backend au démarrage et toutes les 10 secondes
   useEffect(() => {
     fetchStatus();
-    pollingInterval.current = setInterval(fetchStatus, 10000); // Toutes les 10 secondes
-    
+    pollingInterval.current = setInterval(fetchStatus, 10000);
+
     return () => {
       if (pollingInterval.current) {
         clearInterval(pollingInterval.current);
@@ -46,6 +86,27 @@ function App() {
     }
   };
 
+  // Connexion Google
+  const handleGoogleLogin = async () => {
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      setUser(result.user);
+    } catch (error) {
+      console.error("Erreur de connexion Google:", error);
+      alert(`Erreur de connexion: ${error.message}`);
+    }
+  };
+
+  // Déconnexion
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setUser(null);
+    } catch (error) {
+      console.error("Erreur de déconnexion:", error);
+    }
+  };
+
   // Auto-scroll vers le bas
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -55,7 +116,12 @@ function App() {
   const handleSend = async () => {
     if (!input.trim() || loading) return;
 
-    const userMsg = { role: "user", content: input.trim() };
+    const userMsg = { 
+      role: "user", 
+      content: input.trim(),
+      userPhoto: user?.photoURL || null,
+      userName: user?.displayName || "Utilisateur"
+    };
     setMessages(prev => [...prev, userMsg]);
     setInput("");
     setLoading(true);
@@ -68,7 +134,7 @@ function App() {
         city: "Libreville",
         thinking_mode: true
       }, {
-        timeout: 120000 // 120 secondes pour les requêtes complexes
+        timeout: 120000
       });
 
       const aiResponse = response.data.response || "Réponse reçue du serveur.";
@@ -83,16 +149,15 @@ function App() {
         timestamp: new Date().toISOString()
       }]);
 
-      // Mise à jour du status après la réponse
       fetchStatus();
     } catch (error) {
       console.error("Erreur lors de l'appel au backend:", error);
       let errorMsg = "Erreur : impossible de contacter le serveur IA.";
-      
+
       if (error.code === 'ERR_NETWORK') {
-        errorMsg = "⚠️ Serveur injoignable. Vérifiez que votre backend est lancé sur http://localhost:8000";
+        errorMsg = "⚠️ Serveur injoignable. Vérifiez que votre backend est lancé.";
       } else if (error.code === 'ECONNABORTED') {
-        errorMsg = "⏱️ Timeout : la requête a pris trop de temps. Le modèle est peut-être surchargé.";
+        errorMsg = "⏱️ Timeout : la requête a pris trop de temps.";
       } else if (error.response?.status === 400) {
         errorMsg = `❌ Erreur de requête : ${error.response.data.detail || 'Format invalide'}`;
       } else if (error.response?.status === 500) {
@@ -112,7 +177,7 @@ function App() {
     }
   };
 
-  // Upload de fichiers PDF avec feedback de progression
+  // Upload de fichiers PDF
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
@@ -126,7 +191,7 @@ function App() {
     try {
       const res = await axios.post(`${API_BASE}/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 180000, // 3 minutes pour les gros PDFs
+        timeout: 180000,
         onUploadProgress: (progressEvent) => {
           const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
           setUploadProgress(prev => ({ ...prev, percent: percentCompleted }));
@@ -137,7 +202,6 @@ function App() {
       const filesProcessed = res.data.files_processed || 0;
       const totalChunks = res.data.total_doc_chunks || 0;
 
-      // Mise à jour du status immédiate
       setStatus(prev => ({ ...prev, doc_chunks: totalChunks }));
 
       setMessages(prev => [...prev, {
@@ -147,12 +211,10 @@ function App() {
         timestamp: new Date().toISOString()
       }]);
 
-      // Refresh complet du status
       fetchStatus();
     } catch (err) {
       console.error("Erreur upload:", err);
       let errorMsg = "❌ Échec de l'import des documents.";
-      
       if (err.code === 'ECONNABORTED') {
         errorMsg += " Timeout : les fichiers sont peut-être trop volumineux.";
       } else if (err.response?.data?.detail) {
@@ -172,18 +234,15 @@ function App() {
     }
   };
 
-  // Réinitialisation du chat ET de la mémoire
+  // Réinitialisation complète (chat + mémoire)
   const handleReset = async () => {
-    if (!window.confirm("Voulez-vous réinitialiser la conversation ET effacer la mémoire du modèle ?")) {
-      return;
-    }
+    if (!window.confirm("Voulez-vous réinitialiser la conversation ET effacer la mémoire du modèle ?")) return;
 
     try {
-      // Appeler l'endpoint de clear memory
       await axios.post(`${API_BASE}/clear-memory`, {}, { timeout: 5000 });
       setMessages([]);
       fetchStatus();
-      
+
       setMessages([{
         role: "assistant",
         content: "✅ Conversation et mémoire réinitialisées avec succès.",
@@ -195,17 +254,16 @@ function App() {
       setMessages([{
         role: "assistant",
         content: "⚠️ Chat réinitialisé, mais impossible de contacter le serveur pour effacer la mémoire.",
-        error: true
+        error: true,
+        timestamp: new Date().toISOString()
       }]);
     }
   };
 
-  // Toggle thinking pour chaque message
   const toggleThinking = (msgIndex) => {
     setShowThinking(prev => ({ ...prev, [msgIndex]: !prev[msgIndex] }));
   };
 
-  // Formatage du temps relatif
   const formatTimeAgo = (timestamp) => {
     if (!timestamp) return "";
     const seconds = Math.floor((new Date() - new Date(timestamp)) / 1000);
@@ -230,7 +288,34 @@ function App() {
     inputField: { flex: 1, background: 'transparent', border: 'none', color: 'white', padding: '0.8rem', outline: 'none', fontSize: '1rem' },
     sendBtn: { backgroundColor: '#10b981', color: 'white', border: 'none', borderRadius: '1rem', width: '45px', height: '45px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', transition: 'all 0.2s' },
     toolBadge: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', backgroundColor: '#020617', padding: '6px 12px', borderRadius: '10px', border: '1px solid #1e293b', color: '#94a3b8' },
-    statCard: { backgroundColor: 'rgba(2, 6, 23, 0.5)', borderRadius: '1rem', padding: '1rem', border: '1px solid #1e293b', marginBottom: '0.8rem' }
+    statCard: { backgroundColor: 'rgba(2, 6, 23, 0.5)', borderRadius: '1rem', padding: '1rem', border: '1px solid #1e293b', marginBottom: '0.8rem' },
+    googleBtn: { 
+      width: '100%', 
+      padding: '12px 16px', 
+      backgroundColor: '#0f172a', 
+      border: '1px solid #334155', 
+      borderRadius: '12px', 
+      color: '#f1f5f9', 
+      display: 'flex', 
+      alignItems: 'center', 
+      justifyContent: 'center', 
+      gap: '10px', 
+      cursor: 'pointer', 
+      fontWeight: '600', 
+      fontSize: '14px',
+      transition: 'all 0.2s',
+      marginBottom: '1rem'
+    },
+    userProfile: { 
+      display: 'flex', 
+      alignItems: 'center', 
+      gap: '12px', 
+      padding: '12px 16px', 
+      backgroundColor: 'rgba(2, 6, 23, 0.5)', 
+      borderRadius: '12px', 
+      border: '1px solid #334155',
+      marginBottom: '1rem'
+    }
   };
 
   return (
@@ -252,7 +337,97 @@ function App() {
         </div>
 
         <div style={{ padding: '2rem', flex: 1, display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-          {/* Upload de documents */}
+          {/* Section Connexion */}
+          {authLoading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '80px' }}>
+              <Loader2 className="animate-spin" color="#10b981" size={24} />
+            </div>
+          ) : user ? (
+            <div style={styles.userProfile}>
+              <div style={{ position: 'relative' }}>
+                <img 
+                  src={user.photoURL} 
+                  alt={user.displayName || "Utilisateur"}
+                  style={{ 
+                    width: '50px', 
+                    height: '50px', 
+                    borderRadius: '50%',
+                    border: '2px solid #10b981'
+                  }}
+                  onError={(e) => {
+                    e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || "User")}&background=059669&color=fff`;
+                  }}
+                />
+                <div style={{
+                  position: 'absolute',
+                  bottom: 0,
+                  right: 0,
+                  width: '12px',
+                  height: '12px',
+                  backgroundColor: '#10b981',
+                  borderRadius: '50%',
+                  border: '2px solid #0f172a'
+                }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: '600', fontSize: '15px', color: '#f1f5f9' }}>
+                  {user.displayName || "Utilisateur"}
+                </div>
+                <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
+                  {user.email}
+                </div>
+              </div>
+              <button
+                onClick={handleLogout}
+                style={{
+                  backgroundColor: 'transparent',
+                  border: '1px solid #334155',
+                  borderRadius: '8px',
+                  width: '36px',
+                  height: '36px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  color: '#94a3b8',
+                  transition: 'all 0.2s'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.borderColor = '#ef4444';
+                  e.target.style.color = '#ef4444';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.borderColor = '#334155';
+                  e.target.style.color = '#94a3b8';
+                }}
+              >
+                <LogOut size={18} />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleGoogleLogin}
+              style={styles.googleBtn}
+              onMouseEnter={(e) => {
+                e.target.style.backgroundColor = '#1e293b';
+                e.target.style.borderColor = '#475569';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.backgroundColor = '#0f172a';
+                e.target.style.borderColor = '#334155';
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+              </svg>
+              Connexion Google
+            </button>
+          )}
+
+          {/* Upload */}
           <div>
             <h2 style={{ fontSize: '11px', color: '#475569', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: '1rem', fontWeight: '800' }}>
               📚 Documents
@@ -298,13 +473,12 @@ function App() {
             </label>
           </div>
 
-          {/* Statistiques enrichies */}
+          {/* Statistiques */}
           <div>
             <h3 style={{ fontSize: '11px', color: '#475569', textTransform: 'uppercase', marginBottom: '1rem', fontWeight: '800', letterSpacing: '1.5px' }}>
               📊 Statistiques
             </h3>
-            
-            {/* Base de connaissances */}
+
             <div style={styles.statCard}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ color: '#64748b', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -319,7 +493,6 @@ function App() {
               </div>
             </div>
 
-            {/* Mémoire conversationnelle */}
             <div style={styles.statCard}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ color: '#64748b', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -334,7 +507,6 @@ function App() {
               </div>
             </div>
 
-            {/* Contexte conversationnel */}
             {status.current_subject && (
               <div style={styles.statCard}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -351,7 +523,6 @@ function App() {
               </div>
             )}
 
-            {/* Localisation */}
             <div style={styles.statCard}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ color: '#64748b', fontSize: '12px' }}>Position</span>
@@ -361,7 +532,6 @@ function App() {
               </div>
             </div>
 
-            {/* Santé du système */}
             <div style={styles.statCard}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ color: '#64748b', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -431,6 +601,43 @@ function App() {
               <p style={{ color: '#64748b', maxWidth: '450px', lineHeight: '1.7', fontSize: '1.1rem' }}>
                 Assistant IA expert du Gabon avec mémoire contextuelle et analyse documentaire avancée.
               </p>
+              {!user && (
+                <div style={{ marginTop: '2rem' }}>
+                  <button
+                    onClick={handleGoogleLogin}
+                    style={{
+                      padding: '12px 24px',
+                      backgroundColor: '#0f172a',
+                      border: '1px solid #334155',
+                      borderRadius: '12px',
+                      color: '#f1f5f9',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      cursor: 'pointer',
+                      fontWeight: '600',
+                      fontSize: '14px',
+                      transition: 'all 0.2s'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.backgroundColor = '#1e293b';
+                      e.target.style.borderColor = '#475569';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.backgroundColor = '#0f172a';
+                      e.target.style.borderColor = '#334155';
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                    </svg>
+                    Connectez-vous pour commencer
+                  </button>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem' }}>
                 <div style={{ textAlign: 'center' }}>
                   <div style={{ fontSize: '2rem', fontWeight: 'bold', color: '#10b981' }}>{status.doc_chunks}</div>
@@ -456,10 +663,27 @@ function App() {
                   justifyContent: 'center',
                   backgroundColor: m.role === 'user' ? '#059669' : m.error ? '#7f1d1d' : m.success ? '#064e3b' : '#1e293b',
                   flexShrink: 0,
-                  border: '1px solid #334155'
+                  border: '1px solid #334155',
+                  overflow: 'hidden'
                 }}>
                   {m.role === 'user' ? (
-                    <User size={24} color="white" />
+                    m.userPhoto ? (
+                      <img 
+                        src={m.userPhoto} 
+                        alt={m.userName}
+                        style={{ 
+                          width: '100%', 
+                          height: '100%', 
+                          objectFit: 'cover' 
+                        }}
+                        onError={(e) => {
+                          e.target.style.display = 'none';
+                          e.target.parentElement.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;background-color:#059669;"><User size={24} color="white" /></div>`;
+                        }}
+                      />
+                    ) : (
+                      <User size={24} color="white" />
+                    )
                   ) : m.error ? (
                     <AlertCircle size={24} color="#ef4444" />
                   ) : m.success ? (
@@ -470,7 +694,6 @@ function App() {
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', width: '100%' }}>
-                  {/* Informations contextuelles */}
                   {m.role === 'assistant' && !m.error && !m.success && m.context_info && (
                     <div style={{ backgroundColor: 'rgba(30, 41, 59, 0.3)', borderRadius: '12px', padding: '10px 14px', border: '1px solid #1e293b' }}>
                       <button
@@ -482,7 +705,7 @@ function App() {
                         </span>
                         {showThinking[i] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                       </button>
-                      
+
                       {showThinking[i] && (
                         <>
                           <div style={{ display: 'flex', gap: '8px', marginTop: '12px', flexWrap: 'wrap' }}>
@@ -503,7 +726,6 @@ function App() {
                             </div>
                           </div>
 
-                          {/* Détails du contexte */}
                           <div style={{ marginTop: '12px', fontSize: '11px', color: '#64748b', padding: '10px', backgroundColor: '#020617', borderRadius: '8px' }}>
                             {m.context_info.subject_keywords?.length > 0 && (
                               <div style={{ marginBottom: '8px' }}>
@@ -526,7 +748,6 @@ function App() {
                     </div>
                   )}
 
-                  {/* Bulle de message */}
                   <div style={{
                     ...(m.role === 'user' ? styles.userBubble : m.error ? styles.errorBubble : m.success ? styles.successBubble : styles.aiBubble),
                     position: 'relative'
@@ -541,14 +762,13 @@ function App() {
                     )}
                   </div>
 
-                  {/* Images */}
                   {m.images && m.images.length > 0 && (
                     <div style={{ display: 'flex', gap: '12px', marginTop: '8px', overflowX: 'auto', paddingBottom: '10px' }}>
                       {m.images.map((img, idx) => (
                         <div key={idx} style={{ flexShrink: 0, position: 'relative', borderRadius: '1.2rem', overflow: 'hidden', border: '2px solid #334155', backgroundColor: '#0f172a' }}>
-                          <img 
-                            src={img} 
-                            alt={`Image ${idx + 1}`} 
+                          <img
+                            src={img}
+                            alt={`Image ${idx + 1}`}
                             style={{ height: '180px', width: '280px', objectFit: 'cover' }}
                             onError={(e) => {
                               e.target.style.display = 'none';
@@ -597,28 +817,28 @@ function App() {
             <Search size={22} color="#475569" style={{ marginRight: '10px' }} />
             <input
               style={styles.inputField}
-              placeholder="Posez votre question sur le Gabon, vos documents ou l'actualité..."
+              placeholder={user ? "Posez votre question sur le Gabon, vos documents ou l'actualité..." : "Connectez-vous pour poser des questions..."}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                if (e.key === 'Enter' && !e.shiftKey && user) {
                   e.preventDefault();
                   handleSend();
                 }
               }}
-              disabled={loading}
+              disabled={loading || !user}
             />
             <button
-              style={{ 
-                ...styles.sendBtn, 
-                opacity: input.trim() && !loading ? 1 : 0.4,
-                cursor: input.trim() && !loading ? 'pointer' : 'not-allowed',
-                transform: input.trim() && !loading ? 'scale(1)' : 'scale(0.95)'
+              style={{
+                ...styles.sendBtn,
+                opacity: (input.trim() && !loading && user) ? 1 : 0.4,
+                cursor: (input.trim() && !loading && user) ? 'pointer' : 'not-allowed',
+                transform: (input.trim() && !loading && user) ? 'scale(1)' : 'scale(0.95)'
               }}
               onClick={handleSend}
-              disabled={loading || !input.trim()}
+              disabled={loading || !input.trim() || !user}
               onMouseEnter={(e) => {
-                if (input.trim() && !loading) {
+                if (input.trim() && !loading && user) {
                   e.target.style.backgroundColor = '#059669';
                   e.target.style.transform = 'scale(1.05)';
                 }
